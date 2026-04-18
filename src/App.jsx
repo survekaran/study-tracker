@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { PieChart, Pie, Cell, Tooltip, Legend } from "recharts";
 
 function App() {
   const [subject, setSubject] = useState("");
@@ -21,6 +22,28 @@ function App() {
     setSubject("");
     setHours("");
   };
+
+  const totalHours = sessions.reduce((sum, session) => {
+    return sum + session.hours;
+  }, 0);
+
+  const subjectData = [];
+
+  sessions.forEach((session) => {
+    const existing = subjectData.find(
+      (item) => item.name === session.subject
+    );
+
+    if (existing) {
+      existing.value += session.hours;
+    } else {
+      subjectData.push({
+        name: session.subject,
+        value: session.hours,
+      });
+    }
+  });
+  const COLORS = ["#3B82F6", "#10B981", "#F59E0B", "#EF4444"];
 
   return (
     <div className="min-h-screen bg-gray-100 flex flex-col items-center justify-center">
@@ -60,6 +83,28 @@ function App() {
             {session.subject} - {session.hours} hrs
           </div>
         ))}
+      </div>
+      <div className="mt-4 text-lg font-semibold">
+        Total Study Time: {totalHours} hrs
+      </div>
+
+      <div className="mt-6 flex justify-center">
+        <PieChart width={300} height={300}>
+          <Pie
+            data={subjectData}
+            dataKey="value"
+            nameKey="name"
+            innerRadius={60}
+            outerRadius={100}
+            label
+          >
+            {subjectData.map((entry, index) => (
+              <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+            ))}
+          </Pie>
+          <Tooltip />
+          <Legend />
+        </PieChart>
       </div>
     </div>
   );
