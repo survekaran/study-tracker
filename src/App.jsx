@@ -9,15 +9,18 @@ function App() {
   const [seconds, setSeconds] = useState(0);
   const [editIndex, setEditIndex] = useState(null);
 
+  // LOAD
   useEffect(() => {
     const saved = localStorage.getItem("studySessions");
     if (saved) setSessions(JSON.parse(saved));
   }, []);
 
+  // SAVE
   useEffect(() => {
     localStorage.setItem("studySessions", JSON.stringify(sessions));
   }, [sessions]);
 
+  // TIMER
   useEffect(() => {
     let interval;
     if (isRunning) {
@@ -28,6 +31,7 @@ function App() {
     return () => clearInterval(interval);
   }, [isRunning]);
 
+  // ADD / UPDATE
   const handleAdd = () => {
     if (!subject || !hours) {
       alert("Please fill all fields");
@@ -35,18 +39,16 @@ function App() {
     }
 
     const newSession = {
-      subject,
+      subject: subject.trim(),
       hours: parseFloat(hours),
     };
 
     if (editIndex !== null) {
-      // UPDATE MODE
       const updated = [...sessions];
       updated[editIndex] = newSession;
       setSessions(updated);
       setEditIndex(null);
     } else {
-      // ADD MODE
       setSessions([...sessions, newSession]);
     }
 
@@ -54,36 +56,44 @@ function App() {
     setHours("");
   };
 
+  // TIMER START
   const startTimer = () => {
-    if (!subject) {
+    if (!subject.trim()) {
       alert("Enter subject before starting timer");
       return;
     }
     setIsRunning(true);
   };
 
+  // TIMER STOP (FIXED SAFE VERSION)
   const stopTimer = () => {
     setIsRunning(false);
 
-    const hrs = (seconds / 3600).toFixed(2);
+    setSessions((prev) => {
+      const hrs = (seconds / 3600).toFixed(2);
 
-    if (hrs > 0) {
-      const newSession = {
-        subject,
-        hours: parseFloat(hrs),
-      };
-      setSessions([...sessions, newSession]);
-    }
+      if (hrs > 0) {
+        return [
+          ...prev,
+          {
+            subject: subject.trim(),
+            hours: parseFloat(hrs),
+          },
+        ];
+      }
+      return prev;
+    });
 
     setSeconds(0);
   };
 
+  // DELETE
   const handleDelete = (index) => {
     if (!confirm("Delete this session?")) return;
-    const updated = sessions.filter((_, i) => i !== index);
-    setSessions(updated);
+    setSessions(sessions.filter((_, i) => i !== index));
   };
 
+  // EDIT
   const handleEdit = (index) => {
     const session = sessions[index];
     setSubject(session.subject);
@@ -91,6 +101,7 @@ function App() {
     setEditIndex(index);
   };
 
+  // CALCULATIONS
   const totalHours = sessions.reduce((sum, s) => sum + s.hours, 0);
 
   const subjectData = [];
@@ -116,6 +127,7 @@ function App() {
 
         <h1 className="text-2xl font-bold mb-4">Study Tracker 📚</h1>
 
+        {/* INPUT */}
         <input
           type="text"
           placeholder="Enter Subject"
@@ -162,6 +174,7 @@ function App() {
           )}
         </div>
 
+        {/* STATS */}
         <div className="text-lg font-semibold">
           Total: {totalHours.toFixed(2)} hrs
         </div>
@@ -170,7 +183,7 @@ function App() {
           Score: {score}%
         </div>
 
-        {/* PIE CHART */}
+        {/* CHART */}
         <PieChart width={280} height={280}>
           <Pie
             data={subjectData}
@@ -187,7 +200,7 @@ function App() {
           <Legend />
         </PieChart>
 
-        {/* SESSION LIST */}
+        {/* SESSIONS */}
         <div className="mt-4">
           <h2 className="font-semibold mb-2">Sessions</h2>
 
@@ -203,23 +216,22 @@ function App() {
               <div className="flex gap-2">
                 <button
                   onClick={() => handleEdit(index)}
-                  className="bg-yellow-500 text-white px-3 py-1 rounded text-sm hover:bg-yellow-600 transition"
+                  className="bg-yellow-500 text-white px-3 py-1 rounded text-sm"
                 >
                   Edit
                 </button>
                 <button
                   onClick={() => handleDelete(index)}
-                  className="bg-red-500 text-white px-3 py-1 rounded text-sm hover:bg-red-600 transition"
+                  className="bg-red-500 text-white px-3 py-1 rounded text-sm"
                 >
                   Delete
                 </button>
               </div>
-
             </div>
           ))}
         </div>
 
-        {/* PERCENT LIST */}
+        {/* PERCENT */}
         <div className="mt-3">
           {subjectData.map((item, i) => (
             <div
