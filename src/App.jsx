@@ -72,6 +72,19 @@ function App() {
     setSeconds(0);
   };
 
+  const handleDelete = (index) => {
+    const updated = sessions.filter((_, i) => i !== index);
+    setSessions(updated);
+  };
+
+  const handleEdit = (index) => {
+    const session = sessions[index];
+    setSubject(session.subject);
+    setHours(session.hours);
+
+    handleDelete(index);
+  };
+
   const totalHours = sessions.reduce((sum, s) => sum + s.hours, 0);
 
   const subjectData = [];
