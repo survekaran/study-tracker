@@ -7,6 +7,7 @@ function App() {
   const [sessions, setSessions] = useState([]);
   const [isRunning, setIsRunning] = useState(false);
   const [seconds, setSeconds] = useState(0);
+  const [editIndex, setEditIndex] = useState(null);
 
   useEffect(() => {
     const saved = localStorage.getItem("studySessions");
@@ -38,7 +39,17 @@ function App() {
       hours: parseFloat(hours),
     };
 
-    setSessions([...sessions, newSession]);
+    if (editIndex !== null) {
+      // UPDATE MODE
+      const updated = [...sessions];
+      updated[editIndex] = newSession;
+      setSessions(updated);
+      setEditIndex(null);
+    } else {
+      // ADD MODE
+      setSessions([...sessions, newSession]);
+    }
+
     setSubject("");
     setHours("");
   };
@@ -77,7 +88,7 @@ function App() {
     const session = sessions[index];
     setSubject(session.subject);
     setHours(session.hours);
-    handleDelete(index);
+    setEditIndex(index);
   };
 
   const totalHours = sessions.reduce((sum, s) => sum + s.hours, 0);
@@ -125,7 +136,7 @@ function App() {
           onClick={handleAdd}
           className="w-full bg-blue-500 text-white py-2 rounded-lg mb-2"
         >
-          Add Manually
+          {editIndex !== null ? "Update Session" : "Add Manually"}
         </button>
 
         {/* TIMER */}
@@ -189,21 +200,21 @@ function App() {
                 {session.subject} - {session.hours} hrs
               </div>
 
-              <div className="flex gap-4">
+              <div className="flex gap-2">
                 <button
                   onClick={() => handleEdit(index)}
-                  className="text-blue-500 text-sm"
+                  className="bg-yellow-500 text-white px-3 py-1 rounded text-sm hover:bg-yellow-600 transition"
                 >
                   Edit
                 </button>
-
                 <button
                   onClick={() => handleDelete(index)}
-                  className="text-red-500 text-sm"
+                  className="bg-red-500 text-white px-3 py-1 rounded text-sm hover:bg-red-600 transition"
                 >
                   Delete
                 </button>
               </div>
+
             </div>
           ))}
         </div>
