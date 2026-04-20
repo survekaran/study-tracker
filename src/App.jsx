@@ -8,20 +8,15 @@ function App() {
   const [isRunning, setIsRunning] = useState(false);
   const [seconds, setSeconds] = useState(0);
 
-  // LOAD DATA FROM LOCAL STORAGE
   useEffect(() => {
     const saved = localStorage.getItem("studySessions");
-    if (saved) {
-      setSessions(JSON.parse(saved));
-    }
+    if (saved) setSessions(JSON.parse(saved));
   }, []);
 
-  // SAVE DATA
   useEffect(() => {
     localStorage.setItem("studySessions", JSON.stringify(sessions));
   }, [sessions]);
 
-  // TIMER
   useEffect(() => {
     let interval;
     if (isRunning) {
@@ -73,6 +68,7 @@ function App() {
   };
 
   const handleDelete = (index) => {
+    if (!confirm("Delete this session?")) return;
     const updated = sessions.filter((_, i) => i !== index);
     setSessions(updated);
   };
@@ -81,7 +77,6 @@ function App() {
     const session = sessions[index];
     setSubject(session.subject);
     setHours(session.hours);
-
     handleDelete(index);
   };
 
@@ -164,6 +159,7 @@ function App() {
           Score: {score}%
         </div>
 
+        {/* PIE CHART */}
         <PieChart width={280} height={280}>
           <Pie
             data={subjectData}
@@ -180,9 +176,45 @@ function App() {
           <Legend />
         </PieChart>
 
+        {/* SESSION LIST */}
+        <div className="mt-4">
+          <h2 className="font-semibold mb-2">Sessions</h2>
+
+          {sessions.map((session, index) => (
+            <div
+              key={index}
+              className="bg-gray-100 p-2 mb-2 rounded-lg flex justify-between items-center"
+            >
+              <div>
+                {session.subject} - {session.hours} hrs
+              </div>
+
+              <div className="flex gap-4">
+                <button
+                  onClick={() => handleEdit(index)}
+                  className="text-blue-500 text-sm"
+                >
+                  Edit
+                </button>
+
+                <button
+                  onClick={() => handleDelete(index)}
+                  className="text-red-500 text-sm"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* PERCENT LIST */}
         <div className="mt-3">
           {subjectData.map((item, i) => (
-            <div key={i} className="flex justify-between bg-gray-100 p-2 mb-1 rounded">
+            <div
+              key={i}
+              className="flex justify-between bg-gray-100 p-2 mb-1 rounded"
+            >
               <span>{item.name}</span>
               <span>{item.percentage}%</span>
             </div>
