@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { PieChart, Pie, Cell, Tooltip, Legend } from "recharts";
+import CoachPage from "./components/CoachPage";
 
 function App() {
   const [subject, setSubject] = useState("");
@@ -8,16 +9,19 @@ function App() {
   const [isRunning, setIsRunning] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [editIndex, setEditIndex] = useState(null);
+  const [page, setPage] = useState("tracker"); // "tracker" or "coach"
+  const [dws, setDws] = useState(""); // Deep Work Score
+  const [notes, setNotes] = useState("");
 
   // LOAD
   useEffect(() => {
-    const saved = localStorage.getItem("studySessions");
+    const saved = localStorage.getItem("studyTracker_sessions");
     if (saved) setSessions(JSON.parse(saved));
   }, []);
 
   // SAVE
   useEffect(() => {
-    localStorage.setItem("studySessions", JSON.stringify(sessions));
+    localStorage.setItem("studyTracker_sessions", JSON.stringify(sessions));
   }, [sessions]);
 
   // TIMER
@@ -34,13 +38,16 @@ function App() {
   // ADD / UPDATE
   const handleAdd = () => {
     if (!subject || !hours) {
-      alert("Please fill all fields");
+      alert("Please fill in subject and hours");
       return;
     }
 
     const newSession = {
+      date: new Date().toISOString().slice(0, 10), // YYYY-MM-DD
       subject: subject.trim(),
-      hours: parseFloat(hours),
+      durationMinutes: Math.round(parseFloat(hours) * 60), // Convert hours to minutes
+      dws: dws ? parseFloat(dws) : null, // Deep Work Score (1-5)
+      notes: notes.trim() || null,
     };
 
     if (editIndex !== null) {
@@ -54,6 +61,8 @@ function App() {
 
     setSubject("");
     setHours("");
+    setDws("");
+    setNotes("");
   };
 
   // TIMER START
@@ -65,19 +74,22 @@ function App() {
     setIsRunning(true);
   };
 
-  // TIMER STOP (FIXED SAFE VERSION)
+  // TIMER STOP
   const stopTimer = () => {
     setIsRunning(false);
 
     setSessions((prev) => {
-      const hrs = (seconds / 3600).toFixed(2);
+      const durationMinutes = Math.round(seconds / 60);
 
-      if (hrs > 0) {
+      if (durationMinutes > 0) {
         return [
           ...prev,
           {
+            date: new Date().toISOString().slice(0, 10),
             subject: subject.trim(),
-            hours: parseFloat(hrs),
+            durationMinutes,
+            dws: dws ? parseFloat(dws) : null,
+            notes: notes.trim() || null,
           },
         ];
       }
@@ -85,6 +97,9 @@ function App() {
     });
 
     setSeconds(0);
+    setSubject("");
+    setDws("");
+    setNotes("");
   };
 
   // DELETE
@@ -97,18 +112,22 @@ function App() {
   const handleEdit = (index) => {
     const session = sessions[index];
     setSubject(session.subject);
-    setHours(session.hours);
+    setHours((session.durationMinutes / 60).toFixed(2));
+    setDws(session.dws || "");
+    setNotes(session.notes || "");
     setEditIndex(index);
   };
 
   // CALCULATIONS
-  const totalHours = sessions.reduce((sum, s) => sum + s.hours, 0);
+  const totalMinutes = sessions.reduce((sum, s) => sum + s.durationMinutes, 0);
+  const totalHours = totalMinutes / 60;
 
   const subjectData = [];
   sessions.forEach((s) => {
     const existing = subjectData.find((i) => i.name === s.subject);
-    if (existing) existing.value += s.hours;
-    else subjectData.push({ name: s.subject, value: s.hours });
+    const hours = s.durationMinutes / 60;
+    if (existing) existing.value += hours;
+    else subjectData.push({ name: s.subject, value: hours });
   });
 
   subjectData.forEach((i) => {
@@ -121,11 +140,34 @@ function App() {
 
   const COLORS = ["#3B82F6", "#10B981", "#F59E0B", "#EF4444"];
 
+  // Show CoachPage if user navigates to it
+  if (page === "coach") {
+    return (
+      <div>
+        <button
+          onClick={() => setPage("tracker")}
+          className="fixed top-4 left-4 bg-blue-500 text-white px-4 py-2 rounded-lg"
+        >
+          ← Back to Tracker
+        </button>
+        <CoachPage sessions={sessions} />
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gray-100 flex items-center justify-center">
-      <div className="bg-white p-6 rounded-2xl shadow-lg w-[350px] text-center">
+      <div className="bg-white p-6 rounded-2xl shadow-lg w-[400px] text-center">
 
-        <h1 className="text-2xl font-bold mb-4">Study Tracker 📚</h1>
+        <div className="flex justify-between items-center mb-4">
+          <h1 className="text-2xl font-bold">Study Tracker 📚</h1>
+          <button
+            onClick={() => setPage("coach")}
+            className="bg-purple-500 text-white px-3 py-1 rounded text-sm"
+          >
+            AI Coach ✦
+          </button>
+        </div>
 
         {/* INPUT */}
         <input
@@ -142,6 +184,26 @@ function App() {
           value={hours}
           onChange={(e) => setHours(e.target.value)}
           className="w-full mb-2 p-2 border rounded-lg"
+          step="0.5"
+        />
+
+        <input
+          type="number"
+          placeholder="Deep Work Score (1-5)"
+          value={dws}
+          onChange={(e) => setDws(e.target.value)}
+          className="w-full mb-2 p-2 border rounded-lg"
+          min="1"
+          max="5"
+          step="0.1"
+        />
+
+        <textarea
+          placeholder="Notes (optional)"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          className="w-full mb-2 p-2 border rounded-lg"
+          rows="2"
         />
 
         <button
@@ -201,28 +263,30 @@ function App() {
         </PieChart>
 
         {/* SESSIONS */}
-        <div className="mt-4">
+        <div className="mt-4 max-h-[300px] overflow-y-auto">
           <h2 className="font-semibold mb-2">Sessions</h2>
 
           {sessions.map((session, index) => (
             <div
               key={index}
-              className="bg-gray-100 p-2 mb-2 rounded-lg flex justify-between items-center"
+              className="bg-gray-100 p-2 mb-2 rounded-lg text-sm"
             >
-              <div>
-                {session.subject} - {session.hours} hrs
+              <div className="text-left mb-1">
+                <strong>{session.subject}</strong> • {session.date}
               </div>
-
+              <div className="text-left text-xs text-gray-600 mb-1">
+                {(session.durationMinutes / 60).toFixed(2)}h | DWS: {session.dws || "—"} | {session.notes || "no notes"}
+              </div>
               <div className="flex gap-2">
                 <button
                   onClick={() => handleEdit(index)}
-                  className="bg-yellow-500 text-white px-3 py-1 rounded text-sm"
+                  className="bg-yellow-500 text-white px-3 py-1 rounded text-xs"
                 >
                   Edit
                 </button>
                 <button
                   onClick={() => handleDelete(index)}
-                  className="bg-red-500 text-white px-3 py-1 rounded text-sm"
+                  className="bg-red-500 text-white px-3 py-1 rounded text-xs"
                 >
                   Delete
                 </button>
