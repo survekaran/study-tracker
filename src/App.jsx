@@ -1,54 +1,368 @@
-import { useState, useEffect } from "react";
-import { PieChart, Pie, Cell, Tooltip, Legend } from "recharts";
+import { useEffect, useMemo, useRef, useState } from "react";
+import html2canvas from "html2canvas";
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  Cell,
+  Legend,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import CoachPage from "./components/CoachPage";
 
+const SESSION_STORAGE_KEY = "studyTracker_sessions";
+const REVIEW_STORAGE_KEY = "studyTracker_reviews";
+const COLORS = ["#2563EB", "#059669", "#DC2626", "#D97706", "#7C3AED"];
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function toDateKey(date = new Date()) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 10);
+}
+
+function addDays(dateKey, days) {
+  const date = new Date(`${dateKey}T00:00:00`);
+  date.setDate(date.getDate() + days);
+  return toDateKey(date);
+}
+
+function formatShortDate(dateKey) {
+  return new Intl.DateTimeFormat("en", { month: "short", day: "numeric" }).format(
+    new Date(`${dateKey}T00:00:00`),
+  );
+}
+
+function daysBetween(fromKey, toKey) {
+  const from = new Date(`${fromKey}T00:00:00`);
+  const to = new Date(`${toKey}T00:00:00`);
+  return Math.round((to - from) / MS_PER_DAY);
+}
+
+function startOfWeek(dateKey = toDateKey()) {
+  const date = new Date(`${dateKey}T00:00:00`);
+  const day = date.getDay();
+  const offset = day === 0 ? -6 : 1 - day;
+  date.setDate(date.getDate() + offset);
+  return toDateKey(date);
+}
+
+function isWithinRange(dateKey, startKey, endKey) {
+  return dateKey >= startKey && dateKey <= endKey;
+}
+
+function hoursForSessions(items) {
+  return items.reduce((sum, session) => sum + session.durationMinutes / 60, 0);
+}
+
+function subjectTotals(items) {
+  return items.reduce((totals, session) => {
+    totals[session.subject] = (totals[session.subject] ?? 0) + session.durationMinutes / 60;
+    return totals;
+  }, {});
+}
+
+function getSessionHour(session) {
+  if (Number.isFinite(session.hour)) return session.hour;
+  const stamp = session.startedAt ?? session.createdAt;
+  if (!stamp) return null;
+  const hour = new Date(stamp).getHours();
+  return Number.isFinite(hour) ? hour : null;
+}
+
+function getTimeBucket(hour) {
+  if (hour === null) return null;
+  if (hour >= 5 && hour < 12) return "Morning";
+  if (hour >= 12 && hour < 17) return "Afternoon";
+  if (hour >= 17 && hour < 21) return "Evening";
+  return "Night";
+}
+
+function average(values) {
+  const realValues = values.filter((value) => Number.isFinite(value));
+  if (!realValues.length) return null;
+  return realValues.reduce((sum, value) => sum + value, 0) / realValues.length;
+}
+
+function calculateStreak(items, todayKey = toDateKey()) {
+  const studiedDays = new Set(items.map((session) => session.date));
+  let streak = 0;
+  let cursor = todayKey;
+
+  while (studiedDays.has(cursor)) {
+    streak += 1;
+    cursor = addDays(cursor, -1);
+  }
+
+  return streak;
+}
+
+function calculateSm2Review(previousReview, quality, studiedOn = toDateKey()) {
+  const rating = Math.max(1, Math.min(5, Number(quality)));
+  const previousEaseFactor = previousReview?.easeFactor ?? 2.5;
+  const nextEaseFactor = Math.max(
+    1.3,
+    previousEaseFactor +
+      (0.1 - (5 - rating) * (0.08 + (5 - rating) * 0.02)),
+  );
+
+  let repetitions = previousReview?.repetitions ?? 0;
+  let intervalDays = previousReview?.intervalDays ?? 0;
+
+  if (rating < 3) {
+    repetitions = 0;
+    intervalDays = 1;
+  } else {
+    repetitions += 1;
+    if (repetitions === 1) intervalDays = 1;
+    else if (repetitions === 2) intervalDays = 6;
+    else intervalDays = Math.round(intervalDays * nextEaseFactor);
+  }
+
+  return {
+    topic: previousReview?.topic ?? "",
+    easeFactor: Number(nextEaseFactor.toFixed(2)),
+    intervalDays,
+    repetitions,
+    lapses: rating < 3 ? (previousReview?.lapses ?? 0) + 1 : previousReview?.lapses ?? 0,
+    lastRating: rating,
+    lastStudied: studiedOn,
+    nextReview: addDays(studiedOn, intervalDays),
+  };
+}
+
+function buildTimeline(reviewTopics) {
+  const today = toDateKey();
+
+  return Array.from({ length: 14 }, (_, index) => {
+    const date = addDays(today, index);
+    const count = reviewTopics.filter((topic) => topic.nextReview === date).length;
+    return {
+      date,
+      label: index === 0 ? "Today" : date.slice(5),
+      reviews: count,
+    };
+  });
+}
+
+function readStoredArray(key) {
+  try {
+    return JSON.parse(localStorage.getItem(key)) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+function buildDwsTrend(weekStart, sessions) {
+  return Array.from({ length: 7 }, (_, index) => {
+    const date = addDays(weekStart, index);
+    const daySessions = sessions.filter((session) => session.date === date && Number.isFinite(session.dws));
+    const avg = average(daySessions.map((session) => session.dws));
+
+    return {
+      date,
+      label: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][index],
+      dws: avg ? Number(avg.toFixed(1)) : null,
+    };
+  });
+}
+
+function buildDebrief(sessions, reviewTopics) {
+  const today = toDateKey();
+  const weekStart = startOfWeek(today);
+  const weekEnd = addDays(weekStart, 6);
+  const previousStart = addDays(weekStart, -7);
+  const previousEnd = addDays(weekStart, -1);
+  const currentWeek = sessions.filter((session) => isWithinRange(session.date, weekStart, weekEnd));
+  const previousWeek = sessions.filter((session) => isWithinRange(session.date, previousStart, previousEnd));
+  const currentSubjects = subjectTotals(currentWeek);
+  const previousSubjects = subjectTotals(previousWeek);
+  const totalHours = hoursForSessions(currentWeek);
+  const previousHours = hoursForSessions(previousWeek);
+  const topSubjectEntry = Object.entries(currentSubjects).sort((a, b) => b[1] - a[1])[0];
+  const dwsTrend = buildDwsTrend(weekStart, currentWeek);
+  const currentDws = average(currentWeek.map((session) => session.dws));
+  const previousDws = average(previousWeek.map((session) => session.dws));
+  const timeBuckets = currentWeek.reduce((buckets, session) => {
+    const bucket = getTimeBucket(getSessionHour(session));
+    if (!bucket) return buckets;
+    buckets[bucket] = (buckets[bucket] ?? 0) + session.durationMinutes / 60;
+    return buckets;
+  }, {});
+  const bestTimeEntry = Object.entries(timeBuckets).sort((a, b) => b[1] - a[1])[0];
+  const upcomingReviews = reviewTopics.filter((topic) => {
+    const daysAway = daysBetween(today, topic.nextReview);
+    return daysAway >= 0 && daysAway <= 7;
+  });
+
+  const subjectDrop = Object.entries(previousSubjects)
+    .map(([name, hours]) => {
+      const current = currentSubjects[name] ?? 0;
+      return {
+        name,
+        current,
+        previous: hours,
+        dropPercent: hours > 0 ? ((hours - current) / hours) * 100 : 0,
+      };
+    })
+    .filter((item) => item.dropPercent >= 25)
+    .sort((a, b) => b.dropPercent - a.dropPercent)[0];
+
+  const exams = readStoredArray("studyTracker_exams");
+  const examSoon = exams
+    .map((exam) => ({
+      ...exam,
+      daysLeft: Math.ceil((new Date(`${exam.date}T00:00:00`) - new Date(`${today}T00:00:00`)) / MS_PER_DAY),
+    }))
+    .filter((exam) => exam.daysLeft >= 0 && exam.daysLeft <= 21)
+    .sort((a, b) => a.daysLeft - b.daysLeft)[0];
+
+  const nudges = [];
+
+  if (subjectDrop) {
+    nudges.push(
+      `You studied ${Math.round(subjectDrop.dropPercent)}% less ${subjectDrop.name} than last week. Put one focused block on the calendar.`,
+    );
+  }
+
+  if (examSoon) {
+    const subject = examSoon.subject ? `${examSoon.subject} ` : "";
+    nudges.push(`${subject}${examSoon.name} is in ${examSoon.daysLeft} days. Front-load recall practice this week.`);
+  }
+
+  if (upcomingReviews.length > 0) {
+    nudges.push(`${upcomingReviews.length} review${upcomingReviews.length > 1 ? "s" : ""} land in the next 7 days. Clear them before adding new topics.`);
+  }
+
+  if (currentDws !== null && previousDws !== null) {
+    const delta = currentDws - previousDws;
+    nudges.push(
+      delta >= 0
+        ? `DWS is up ${delta.toFixed(1)} points from last week. Keep the same study environment.`
+        : `DWS dipped ${Math.abs(delta).toFixed(1)} points. Use shorter blocks and remove one distraction trigger.`,
+    );
+  }
+
+  if (totalHours < previousHours && previousHours > 0) {
+    const drop = Math.round(((previousHours - totalHours) / previousHours) * 100);
+    nudges.push(`Total study time is down ${drop}% week over week. Add a recovery session before Sunday.`);
+  }
+
+  if (nudges.length < 3) {
+    nudges.push("Schedule your hardest topic during your best time window next week.");
+  }
+  if (nudges.length < 3) {
+    nudges.push("Turn one weak note into active recall questions before your next session.");
+  }
+  if (nudges.length < 3) {
+    nudges.push("Keep one review-only block so spaced repetition does not crowd new learning.");
+  }
+
+  return {
+    weekStart,
+    weekEnd,
+    totalHours,
+    previousHours,
+    topSubject: topSubjectEntry?.[0] ?? "No sessions yet",
+    topSubjectHours: topSubjectEntry?.[1] ?? 0,
+    bestTime: bestTimeEntry?.[0] ?? "Not enough timed data",
+    bestTimeHours: bestTimeEntry?.[1] ?? 0,
+    streak: calculateStreak(sessions, today),
+    currentDws,
+    previousDws,
+    dwsTrend,
+    nudges: nudges.slice(0, 3),
+  };
+}
+
 function App() {
+  const debriefRef = useRef(null);
   const [subject, setSubject] = useState("");
   const [hours, setHours] = useState("");
-  const [sessions, setSessions] = useState([]);
+  const [retention, setRetention] = useState("4");
+  const [sessions, setSessions] = useState(() => readStoredArray(SESSION_STORAGE_KEY));
+  const [reviewTopics, setReviewTopics] = useState(() => readStoredArray(REVIEW_STORAGE_KEY));
   const [isRunning, setIsRunning] = useState(false);
   const [seconds, setSeconds] = useState(0);
+  const [timerStartedAt, setTimerStartedAt] = useState(null);
   const [editIndex, setEditIndex] = useState(null);
-  const [page, setPage] = useState("tracker"); // "tracker" or "coach"
-  const [dws, setDws] = useState(""); // Deep Work Score
+  const [page, setPage] = useState("tracker");
+  const [dws, setDws] = useState("");
   const [notes, setNotes] = useState("");
 
-  // LOAD
   useEffect(() => {
-    const saved = localStorage.getItem("studyTracker_sessions");
-    if (saved) setSessions(JSON.parse(saved));
-  }, []);
-
-  // SAVE
-  useEffect(() => {
-    localStorage.setItem("studyTracker_sessions", JSON.stringify(sessions));
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessions));
   }, [sessions]);
 
-  // TIMER
   useEffect(() => {
-    let interval;
-    if (isRunning) {
-      interval = setInterval(() => {
-        setSeconds((prev) => prev + 1);
-      }, 1000);
-    }
+    localStorage.setItem(REVIEW_STORAGE_KEY, JSON.stringify(reviewTopics));
+  }, [reviewTopics]);
+
+  useEffect(() => {
+    if (!isRunning) return undefined;
+
+    const interval = setInterval(() => {
+      setSeconds((prev) => prev + 1);
+    }, 1000);
+
     return () => clearInterval(interval);
   }, [isRunning]);
 
-  // ADD / UPDATE
+  const updateReviewSchedule = (topic, rating, studiedOn = toDateKey()) => {
+    const cleanTopic = topic.trim();
+    if (!cleanTopic) return;
+
+    setReviewTopics((previous) => {
+      const current = previous.find(
+        (item) => item.topic.toLowerCase() === cleanTopic.toLowerCase(),
+      );
+      const next = {
+        ...calculateSm2Review(current, rating, studiedOn),
+        topic: current?.topic ?? cleanTopic,
+      };
+
+      if (!current) return [...previous, next];
+      return previous.map((item) => (item.topic === current.topic ? next : item));
+    });
+  };
+
+  const resetForm = () => {
+    setSubject("");
+    setHours("");
+    setRetention("4");
+    setDws("");
+    setNotes("");
+  };
+
+  const buildSession = (durationMinutes, startedAt = new Date().toISOString()) => ({
+    date: toDateKey(new Date(startedAt)),
+    subject: subject.trim(),
+    durationMinutes,
+    retention: Number(retention),
+    dws: dws ? parseFloat(dws) : null,
+    notes: notes.trim() || null,
+    startedAt,
+    completedAt: new Date().toISOString(),
+    hour: new Date(startedAt).getHours(),
+  });
+
   const handleAdd = () => {
-    if (!subject || !hours) {
-      alert("Please fill in subject and hours");
+    if (!subject.trim() || !hours) {
+      alert("Please fill in topic and hours");
       return;
     }
 
-    const newSession = {
-      date: new Date().toISOString().slice(0, 10), // YYYY-MM-DD
-      subject: subject.trim(),
-      durationMinutes: Math.round(parseFloat(hours) * 60), // Convert hours to minutes
-      dws: dws ? parseFloat(dws) : null, // Deep Work Score (1-5)
-      notes: notes.trim() || null,
-    };
+    const durationMinutes = Math.round(parseFloat(hours) * 60);
+    if (!durationMinutes || durationMinutes < 1) {
+      alert("Hours studied must be greater than 0");
+      return;
+    }
+
+    const newSession = buildSession(durationMinutes);
 
     if (editIndex !== null) {
       const updated = [...sessions];
@@ -59,96 +373,104 @@ function App() {
       setSessions([...sessions, newSession]);
     }
 
-    setSubject("");
-    setHours("");
-    setDws("");
-    setNotes("");
+    updateReviewSchedule(newSession.subject, newSession.retention, newSession.date);
+    resetForm();
   };
 
-  // TIMER START
   const startTimer = () => {
     if (!subject.trim()) {
-      alert("Enter subject before starting timer");
+      alert("Enter topic before starting timer");
       return;
     }
+    setTimerStartedAt(new Date().toISOString());
     setIsRunning(true);
   };
 
-  // TIMER STOP
   const stopTimer = () => {
     setIsRunning(false);
 
-    setSessions((prev) => {
-      const durationMinutes = Math.round(seconds / 60);
-
-      if (durationMinutes > 0) {
-        return [
-          ...prev,
-          {
-            date: new Date().toISOString().slice(0, 10),
-            subject: subject.trim(),
-            durationMinutes,
-            dws: dws ? parseFloat(dws) : null,
-            notes: notes.trim() || null,
-          },
-        ];
-      }
-      return prev;
-    });
+    const durationMinutes = Math.round(seconds / 60);
+    if (durationMinutes > 0) {
+      const session = buildSession(durationMinutes, timerStartedAt ?? new Date().toISOString());
+      setSessions((previous) => [...previous, session]);
+      updateReviewSchedule(session.subject, session.retention, session.date);
+    }
 
     setSeconds(0);
-    setSubject("");
-    setDws("");
-    setNotes("");
+    setTimerStartedAt(null);
+    resetForm();
   };
 
-  // DELETE
   const handleDelete = (index) => {
     if (!confirm("Delete this session?")) return;
     setSessions(sessions.filter((_, i) => i !== index));
   };
 
-  // EDIT
   const handleEdit = (index) => {
     const session = sessions[index];
     setSubject(session.subject);
     setHours((session.durationMinutes / 60).toFixed(2));
+    setRetention(String(session.retention ?? 4));
     setDws(session.dws || "");
     setNotes(session.notes || "");
     setEditIndex(index);
   };
 
-  // CALCULATIONS
+  const markReviewed = (topic, rating) => {
+    updateReviewSchedule(topic, rating);
+  };
+
   const totalMinutes = sessions.reduce((sum, s) => sum + s.durationMinutes, 0);
   const totalHours = totalMinutes / 60;
 
-  const subjectData = [];
-  sessions.forEach((s) => {
-    const existing = subjectData.find((i) => i.name === s.subject);
-    const hours = s.durationMinutes / 60;
-    if (existing) existing.value += hours;
-    else subjectData.push({ name: s.subject, value: hours });
-  });
+  const subjectData = useMemo(() => {
+    const totals = sessions.reduce((items, session) => {
+      const key = session.subject;
+      items[key] = (items[key] ?? 0) + session.durationMinutes / 60;
+      return items;
+    }, {});
 
-  subjectData.forEach((i) => {
-    i.percentage = totalHours
-      ? ((i.value / totalHours) * 100).toFixed(1)
-      : 0;
-  });
+    return Object.entries(totals).map(([name, value]) => ({
+      name,
+      value,
+      percentage: totalHours ? ((value / totalHours) * 100).toFixed(1) : 0,
+    }));
+  }, [sessions, totalHours]);
 
+  const today = toDateKey();
+  const sortedReviews = [...reviewTopics].sort(
+    (a, b) => new Date(a.nextReview) - new Date(b.nextReview),
+  );
+  const dueTopics = sortedReviews.filter((topic) => daysBetween(today, topic.nextReview) <= 0);
+  const nearDueTopics = sortedReviews.filter((topic) => {
+    const daysAway = daysBetween(today, topic.nextReview);
+    return daysAway > 0 && daysAway <= 2;
+  });
+  const timelineData = buildTimeline(reviewTopics);
+  const weeklyDebrief = useMemo(() => buildDebrief(sessions, reviewTopics), [sessions, reviewTopics]);
   const score = Math.min((totalHours / 6) * 100, 100).toFixed(0);
 
-  const COLORS = ["#3B82F6", "#10B981", "#F59E0B", "#EF4444"];
+  const exportDebrief = async () => {
+    if (!debriefRef.current) return;
 
-  // Show CoachPage if user navigates to it
+    const canvas = await html2canvas(debriefRef.current, {
+      backgroundColor: "#ffffff",
+      scale: 2,
+    });
+    const link = document.createElement("a");
+    link.download = `study-debrief-${weeklyDebrief.weekEnd}.png`;
+    link.href = canvas.toDataURL("image/png");
+    link.click();
+  };
+
   if (page === "coach") {
     return (
-      <div>
+      <div className="min-h-screen bg-slate-950">
         <button
           onClick={() => setPage("tracker")}
-          className="fixed top-4 left-4 bg-blue-500 text-white px-4 py-2 rounded-lg"
+          className="fixed left-4 top-4 z-10 rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700"
         >
-          ← Back to Tracker
+          Back to Tracker
         </button>
         <CoachPage sessions={sessions} />
       </div>
@@ -156,159 +478,371 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-100 flex items-center justify-center">
-      <div className="bg-white p-6 rounded-2xl shadow-lg w-[400px] text-center">
-
-        <div className="flex justify-between items-center mb-4">
-          <h1 className="text-2xl font-bold">Study Tracker 📚</h1>
-          <button
-            onClick={() => setPage("coach")}
-            className="bg-purple-500 text-white px-3 py-1 rounded text-sm"
-          >
-            AI Coach ✦
-          </button>
-        </div>
-
-        {/* INPUT */}
-        <input
-          type="text"
-          placeholder="Enter Subject"
-          value={subject}
-          onChange={(e) => setSubject(e.target.value)}
-          className="w-full mb-2 p-2 border rounded-lg"
-        />
-
-        <input
-          type="number"
-          placeholder="Hours Studied"
-          value={hours}
-          onChange={(e) => setHours(e.target.value)}
-          className="w-full mb-2 p-2 border rounded-lg"
-          step="0.5"
-        />
-
-        <input
-          type="number"
-          placeholder="Deep Work Score (1-5)"
-          value={dws}
-          onChange={(e) => setDws(e.target.value)}
-          className="w-full mb-2 p-2 border rounded-lg"
-          min="1"
-          max="5"
-          step="0.1"
-        />
-
-        <textarea
-          placeholder="Notes (optional)"
-          value={notes}
-          onChange={(e) => setNotes(e.target.value)}
-          className="w-full mb-2 p-2 border rounded-lg"
-          rows="2"
-        />
-
-        <button
-          onClick={handleAdd}
-          className="w-full bg-blue-500 text-white py-2 rounded-lg mb-2"
-        >
-          {editIndex !== null ? "Update Session" : "Add Manually"}
-        </button>
-
-        {/* TIMER */}
-        <div className="mb-3">
-          <div className="text-lg font-semibold">
-            ⏱ {Math.floor(seconds / 60)}m {seconds % 60}s
+    <div className="min-h-screen bg-zinc-100 px-4 py-6 text-zinc-950">
+      <main className="mx-auto grid max-w-7xl gap-5 lg:grid-cols-[380px_1fr]">
+        <section className="rounded-lg border border-zinc-200 bg-white p-5 shadow-sm">
+          <div className="mb-5 flex items-center justify-between gap-3">
+            <div>
+              <h1 className="text-2xl font-bold tracking-normal">Study Tracker</h1>
+              <p className="text-sm text-zinc-500">Time tracking plus SM-2 review scheduling.</p>
+            </div>
+            <button
+              onClick={() => setPage("coach")}
+              className="rounded-md bg-violet-600 px-3 py-2 text-sm font-semibold text-white hover:bg-violet-700"
+            >
+              AI Coach
+            </button>
           </div>
 
-          {!isRunning ? (
+          <div className="grid gap-3">
+            <label className="text-left text-sm font-semibold">
+              Topic
+              <input
+                type="text"
+                placeholder="Physics: rotational motion"
+                value={subject}
+                onChange={(e) => setSubject(e.target.value)}
+                className="mt-1 w-full rounded-md border border-zinc-300 p-2 font-normal outline-none focus:border-blue-500"
+              />
+            </label>
+
+            <label className="text-left text-sm font-semibold">
+              Hours studied
+              <input
+                type="number"
+                placeholder="1.5"
+                value={hours}
+                onChange={(e) => setHours(e.target.value)}
+                className="mt-1 w-full rounded-md border border-zinc-300 p-2 font-normal outline-none focus:border-blue-500"
+                min="0"
+                step="0.25"
+              />
+            </label>
+
+            <label className="text-left text-sm font-semibold">
+              Retention rating: {retention}/5
+              <input
+                type="range"
+                value={retention}
+                onChange={(e) => setRetention(e.target.value)}
+                className="mt-2 w-full accent-blue-600"
+                min="1"
+                max="5"
+                step="1"
+              />
+              <span className="mt-1 block text-xs font-normal text-zinc-500">
+                1 = forgot it, 5 = effortless recall
+              </span>
+            </label>
+
+            <label className="text-left text-sm font-semibold">
+              Deep Work Score
+              <input
+                type="number"
+                placeholder="Optional, 1-5"
+                value={dws}
+                onChange={(e) => setDws(e.target.value)}
+                className="mt-1 w-full rounded-md border border-zinc-300 p-2 font-normal outline-none focus:border-blue-500"
+                min="1"
+                max="5"
+                step="0.1"
+              />
+            </label>
+
+            <textarea
+              placeholder="Notes"
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              className="min-h-20 w-full rounded-md border border-zinc-300 p-2 outline-none focus:border-blue-500"
+            />
+
             <button
-              onClick={startTimer}
-              className="bg-green-500 text-white px-4 py-1 rounded mt-2"
+              onClick={handleAdd}
+              className="rounded-md bg-blue-600 py-2 font-semibold text-white hover:bg-blue-700"
             >
-              Start
+              {editIndex !== null ? "Update Session and Schedule" : "Add Session and Schedule"}
             </button>
-          ) : (
-            <button
-              onClick={stopTimer}
-              className="bg-red-500 text-white px-4 py-1 rounded mt-2"
-            >
-              Stop
-            </button>
-          )}
-        </div>
+          </div>
 
-        {/* STATS */}
-        <div className="text-lg font-semibold">
-          Total: {totalHours.toFixed(2)} hrs
-        </div>
+          <div className="mt-5 rounded-lg border border-zinc-200 bg-zinc-50 p-4">
+            <div className="text-lg font-semibold">
+              {Math.floor(seconds / 60)}m {seconds % 60}s
+            </div>
+            {!isRunning ? (
+              <button
+                onClick={startTimer}
+                className="mt-2 rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+              >
+                Start Timer
+              </button>
+            ) : (
+              <button
+                onClick={stopTimer}
+                className="mt-2 rounded-md bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700"
+              >
+                Stop and Schedule
+              </button>
+            )}
+          </div>
+        </section>
 
-        <div className="text-green-600 font-bold">
-          Score: {score}%
-        </div>
+        <section className="grid gap-5">
+          <div className="grid gap-5 md:grid-cols-3">
+            <div className="rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
+              <p className="text-sm text-zinc-500">Total study time</p>
+              <p className="mt-1 text-3xl font-bold">{totalHours.toFixed(2)}h</p>
+            </div>
+            <div className="rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
+              <p className="text-sm text-zinc-500">Daily impact score</p>
+              <p className="mt-1 text-3xl font-bold text-emerald-700">{score}%</p>
+            </div>
+            <div className="rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
+              <p className="text-sm text-zinc-500">Due today</p>
+              <p className="mt-1 text-3xl font-bold text-red-700">{dueTopics.length}</p>
+            </div>
+          </div>
 
-        {/* CHART */}
-        <PieChart width={280} height={280}>
-          <Pie
-            data={subjectData}
-            dataKey="value"
-            nameKey="name"
-            innerRadius={60}
-            outerRadius={100}
-          >
-            {subjectData.map((_, i) => (
-              <Cell key={i} fill={COLORS[i % COLORS.length]} />
-            ))}
-          </Pie>
-          <Tooltip />
-          <Legend />
-        </PieChart>
+          <div className="rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-bold">Weekly Debrief</h2>
+                <p className="text-sm text-zinc-500">
+                  Auto-generated Sunday summary for {formatShortDate(weeklyDebrief.weekStart)} to{" "}
+                  {formatShortDate(weeklyDebrief.weekEnd)}.
+                </p>
+              </div>
+              <button
+                onClick={exportDebrief}
+                className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800"
+              >
+                Export PNG
+              </button>
+            </div>
 
-        {/* SESSIONS */}
-        <div className="mt-4 max-h-[300px] overflow-y-auto">
-          <h2 className="font-semibold mb-2">Sessions</h2>
-
-          {sessions.map((session, index) => (
             <div
-              key={index}
-              className="bg-gray-100 p-2 mb-2 rounded-lg text-sm"
+              ref={debriefRef}
+              className="overflow-hidden rounded-lg border border-zinc-200 bg-white text-zinc-950"
             >
-              <div className="text-left mb-1">
-                <strong>{session.subject}</strong> • {session.date}
+              <div className="grid gap-4 bg-zinc-950 p-5 text-white md:grid-cols-[1fr_260px]">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-blue-200">Sunday study debrief</p>
+                  <h3 className="mt-2 text-3xl font-bold tracking-normal">
+                    {weeklyDebrief.totalHours.toFixed(1)} hours logged
+                  </h3>
+                  <p className="mt-2 text-sm text-zinc-300">
+                    Top focus: {weeklyDebrief.topSubject}{" "}
+                    {weeklyDebrief.topSubjectHours > 0 && `(${weeklyDebrief.topSubjectHours.toFixed(1)}h)`}
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-sm">
+                  <div className="rounded-md bg-white/10 p-3">
+                    <p className="text-zinc-300">Streak</p>
+                    <p className="text-2xl font-bold">{weeklyDebrief.streak}d</p>
+                  </div>
+                  <div className="rounded-md bg-white/10 p-3">
+                    <p className="text-zinc-300">Avg DWS</p>
+                    <p className="text-2xl font-bold">
+                      {weeklyDebrief.currentDws === null ? "n/a" : weeklyDebrief.currentDws.toFixed(1)}
+                    </p>
+                  </div>
+                  <div className="col-span-2 rounded-md bg-white/10 p-3">
+                    <p className="text-zinc-300">Best time of day</p>
+                    <p className="text-xl font-bold">{weeklyDebrief.bestTime}</p>
+                    {weeklyDebrief.bestTimeHours > 0 && (
+                      <p className="text-xs text-zinc-300">{weeklyDebrief.bestTimeHours.toFixed(1)}h studied there</p>
+                    )}
+                  </div>
+                </div>
               </div>
-              <div className="text-left text-xs text-gray-600 mb-1">
-                {(session.durationMinutes / 60).toFixed(2)}h | DWS: {session.dws || "—"} | {session.notes || "no notes"}
+
+              <div className="grid gap-4 p-5 lg:grid-cols-[280px_1fr]">
+                <div>
+                  <p className="text-sm font-bold">DWS trend</p>
+                  <div className="mt-2 h-44">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={weeklyDebrief.dwsTrend} margin={{ top: 8, right: 8, left: -24, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#E4E4E7" />
+                        <XAxis dataKey="label" tick={{ fontSize: 11 }} />
+                        <YAxis domain={[0, 5]} tick={{ fontSize: 11 }} />
+                        <Tooltip />
+                        <Area
+                          type="monotone"
+                          dataKey="dws"
+                          stroke="#059669"
+                          strokeWidth={3}
+                          fill="#D1FAE5"
+                          connectNulls
+                        />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+
+                <div>
+                  <p className="text-sm font-bold">Next-week nudges</p>
+                  <div className="mt-2 grid gap-2">
+                    {weeklyDebrief.nudges.map((nudge, index) => (
+                      <div key={nudge} className="rounded-md border border-zinc-200 bg-zinc-50 p-3 text-sm">
+                        <span className="mr-2 font-bold text-blue-700">{index + 1}.</span>
+                        {nudge}
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => handleEdit(index)}
-                  className="bg-yellow-500 text-white px-3 py-1 rounded text-xs"
-                >
-                  Edit
-                </button>
-                <button
-                  onClick={() => handleDelete(index)}
-                  className="bg-red-500 text-white px-3 py-1 rounded text-xs"
-                >
-                  Delete
-                </button>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200 px-5 py-3 text-xs text-zinc-500">
+                <span>
+                  Week over week:{" "}
+                  {weeklyDebrief.previousHours > 0
+                    ? `${Math.round(((weeklyDebrief.totalHours - weeklyDebrief.previousHours) / weeklyDebrief.previousHours) * 100)}%`
+                    : "new baseline"}
+                </span>
+                <span>Generated by Study Tracker</span>
               </div>
             </div>
-          ))}
-        </div>
+          </div>
 
-        {/* PERCENT */}
-        <div className="mt-3">
-          {subjectData.map((item, i) => (
-            <div
-              key={i}
-              className="flex justify-between bg-gray-100 p-2 mb-1 rounded"
-            >
-              <span>{item.name}</span>
-              <span>{item.percentage}%</span>
+          <div className="grid gap-5 xl:grid-cols-[1fr_360px]">
+            <div className="rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-bold">Upcoming Reviews</h2>
+                  <p className="text-sm text-zinc-500">Next 14 days from SM-2 intervals.</p>
+                </div>
+                <span className="rounded-md bg-zinc-100 px-2 py-1 text-xs font-semibold text-zinc-600">
+                  {reviewTopics.length} topics
+                </span>
+              </div>
+              <div className="h-72">
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={timelineData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="reviews" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#2563EB" stopOpacity={0.35} />
+                        <stop offset="95%" stopColor="#2563EB" stopOpacity={0.03} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#E4E4E7" />
+                    <XAxis dataKey="label" tick={{ fontSize: 12 }} />
+                    <YAxis allowDecimals={false} tick={{ fontSize: 12 }} />
+                    <Tooltip />
+                    <Area
+                      type="monotone"
+                      dataKey="reviews"
+                      stroke="#2563EB"
+                      strokeWidth={3}
+                      fill="url(#reviews)"
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
             </div>
-          ))}
-        </div>
 
-      </div>
+            <div className="rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
+              <h2 className="text-lg font-bold">Due Today</h2>
+              <p className="mb-3 text-sm text-zinc-500">Rate recall after review to schedule the next date.</p>
+              <div className="grid max-h-72 gap-2 overflow-y-auto">
+                {[...dueTopics, ...nearDueTopics].length === 0 ? (
+                  <p className="rounded-md bg-zinc-50 p-3 text-sm text-zinc-500">No reviews due yet.</p>
+                ) : (
+                  [...dueTopics, ...nearDueTopics].map((topic) => {
+                    const daysAway = daysBetween(today, topic.nextReview);
+                    return (
+                      <div key={topic.topic} className="rounded-md border border-zinc-200 p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="font-semibold">{topic.topic}</p>
+                            <p className="text-xs text-zinc-500">
+                              {daysAway <= 0 ? "Due now" : `Due in ${daysAway} day${daysAway > 1 ? "s" : ""}`} |
+                              interval {topic.intervalDays}d | EF {topic.easeFactor}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="mt-2 grid grid-cols-5 gap-1">
+                          {[1, 2, 3, 4, 5].map((rating) => (
+                            <button
+                              key={rating}
+                              onClick={() => markReviewed(topic.topic, rating)}
+                              className="rounded-md border border-zinc-200 py-1 text-xs font-semibold hover:border-blue-500 hover:bg-blue-50"
+                              title={`Rate ${rating}/5`}
+                            >
+                              {rating}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="grid gap-5 xl:grid-cols-[360px_1fr]">
+            <div className="rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
+              <h2 className="mb-2 text-lg font-bold">Time by Topic</h2>
+              <div className="h-72">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={subjectData}
+                      dataKey="value"
+                      nameKey="name"
+                      innerRadius={58}
+                      outerRadius={95}
+                    >
+                      {subjectData.map((_, i) => (
+                        <Cell key={i} fill={COLORS[i % COLORS.length]} />
+                      ))}
+                    </Pie>
+                    <Tooltip />
+                    <Legend />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
+              <h2 className="mb-3 text-lg font-bold">Sessions</h2>
+              <div className="grid max-h-80 gap-2 overflow-y-auto">
+                {sessions.length === 0 ? (
+                  <p className="rounded-md bg-zinc-50 p-3 text-sm text-zinc-500">Add your first study session.</p>
+                ) : (
+                  sessions.map((session, index) => (
+                    <div key={`${session.date}-${session.subject}-${index}`} className="rounded-md bg-zinc-50 p-3 text-sm">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="font-semibold">{session.subject}</p>
+                          <p className="text-xs text-zinc-500">
+                            {session.date} | {(session.durationMinutes / 60).toFixed(2)}h | retention{" "}
+                            {session.retention ?? "n/a"}/5 | DWS {session.dws || "n/a"}
+                          </p>
+                          {session.notes && <p className="mt-1 text-xs text-zinc-600">{session.notes}</p>}
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => handleEdit(index)}
+                            className="rounded-md bg-amber-500 px-3 py-1 text-xs font-semibold text-white hover:bg-amber-600"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => handleDelete(index)}
+                            className="rounded-md bg-red-600 px-3 py-1 text-xs font-semibold text-white hover:bg-red-700"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
     </div>
   );
 }
