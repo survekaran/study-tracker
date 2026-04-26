@@ -3,6 +3,8 @@ import html2canvas from "html2canvas";
 import {
   Area,
   AreaChart,
+  Bar,
+  BarChart,
   CartesianGrid,
   Cell,
   Legend,
@@ -17,8 +19,10 @@ import CoachPage from "./components/CoachPage";
 
 const SESSION_STORAGE_KEY = "studyTracker_sessions";
 const REVIEW_STORAGE_KEY = "studyTracker_reviews";
+const EXAM_STORAGE_KEY = "studyTracker_exams";
 const COLORS = ["#2563EB", "#059669", "#DC2626", "#D97706", "#7C3AED"];
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const MASTERY_POINTS_PER_HOUR = 4;
 
 function toDateKey(date = new Date()) {
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
@@ -86,6 +90,82 @@ function average(values) {
   const realValues = values.filter((value) => Number.isFinite(value));
   if (!realValues.length) return null;
   return realValues.reduce((sum, value) => sum + value, 0) / realValues.length;
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function matchesExamSubject(sessionSubject, examSubject) {
+  if (!examSubject) return true;
+  return sessionSubject.toLowerCase().includes(examSubject.toLowerCase());
+}
+
+function getUrgency(daysLeft) {
+  if (daysLeft <= 7) return { label: "Critical", color: "#DC2626", bg: "bg-red-50", text: "text-red-700" };
+  if (daysLeft <= 21) return { label: "High", color: "#D97706", bg: "bg-amber-50", text: "text-amber-700" };
+  if (daysLeft <= 45) return { label: "Rising", color: "#2563EB", bg: "bg-blue-50", text: "text-blue-700" };
+  return { label: "Steady", color: "#059669", bg: "bg-emerald-50", text: "text-emerald-700" };
+}
+
+function buildExamPlans(exams, sessions, today = toDateKey()) {
+  const weekStart = startOfWeek(today);
+  const weekEnd = addDays(weekStart, 6);
+
+  return exams
+    .filter((exam) => exam?.name && exam?.date)
+    .map((exam, index) => {
+      const confidence = clamp(Number(exam.confidence) || 0, 0, 100);
+      const targetMastery = clamp(Number(exam.targetMastery) || 85, 1, 100);
+      const daysLeft = Math.max(0, daysBetween(today, exam.date));
+      const relevantSessions = sessions.filter((session) =>
+        matchesExamSubject(session.subject, exam.subject ?? ""),
+      );
+      const relevantHours = hoursForSessions(relevantSessions);
+      const currentWeekHours = hoursForSessions(
+        relevantSessions.filter((session) => isWithinRange(session.date, weekStart, weekEnd)),
+      );
+      const projectedMastery = clamp(
+        confidence + relevantHours * MASTERY_POINTS_PER_HOUR,
+        0,
+        100,
+      );
+      const masteryGap = Math.max(0, targetMastery - projectedMastery);
+      const remainingHours = masteryGap / MASTERY_POINTS_PER_HOUR;
+      const weeksLeft = Math.max(daysLeft / 7, 1 / 7);
+      const hoursPerWeek = daysLeft === 0 ? remainingHours : remainingHours / weeksLeft;
+      const hoursPerDay = daysLeft === 0 ? remainingHours : remainingHours / Math.max(daysLeft, 1);
+      const thisWeekTarget = Math.max(0, hoursPerWeek - currentWeekHours);
+      const urgency = getUrgency(daysLeft);
+
+      return {
+        ...exam,
+        id: exam.id ?? `${exam.name}-${exam.date}-${index}`,
+        subject: exam.subject ?? "",
+        confidence,
+        targetMastery,
+        daysLeft,
+        relevantHours,
+        currentWeekHours,
+        projectedMastery,
+        masteryGap,
+        remainingHours,
+        hoursPerWeek,
+        hoursPerDay,
+        thisWeekTarget,
+        urgency,
+      };
+    })
+    .sort((a, b) => a.daysLeft - b.daysLeft);
+}
+
+function buildCountdownData(plans) {
+  return plans.map((plan) => ({
+    name: plan.name,
+    daysLeft: plan.daysLeft,
+    subject: plan.subject || "All topics",
+    fill: plan.urgency.color,
+  }));
 }
 
 function calculateStreak(items, todayKey = toDateKey()) {
@@ -293,6 +373,12 @@ function App() {
   const [page, setPage] = useState("tracker");
   const [dws, setDws] = useState("");
   const [notes, setNotes] = useState("");
+  const [exams, setExams] = useState(() => readStoredArray(EXAM_STORAGE_KEY));
+  const [examName, setExamName] = useState("");
+  const [examSubject, setExamSubject] = useState("");
+  const [examDate, setExamDate] = useState("");
+  const [examConfidence, setExamConfidence] = useState("45");
+  const [examTargetMastery, setExamTargetMastery] = useState("85");
 
   useEffect(() => {
     localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessions));
@@ -301,6 +387,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem(REVIEW_STORAGE_KEY, JSON.stringify(reviewTopics));
   }, [reviewTopics]);
+
+  useEffect(() => {
+    localStorage.setItem(EXAM_STORAGE_KEY, JSON.stringify(exams));
+  }, [exams]);
 
   useEffect(() => {
     if (!isRunning) return undefined;
@@ -336,6 +426,14 @@ function App() {
     setRetention("4");
     setDws("");
     setNotes("");
+  };
+
+  const resetExamForm = () => {
+    setExamName("");
+    setExamSubject("");
+    setExamDate("");
+    setExamConfidence("45");
+    setExamTargetMastery("85");
   };
 
   const buildSession = (durationMinutes, startedAt = new Date().toISOString()) => ({
@@ -416,6 +514,40 @@ function App() {
     setEditIndex(index);
   };
 
+  const handleAddExam = () => {
+    if (!examName.trim() || !examDate) {
+      alert("Please add an exam name and date");
+      return;
+    }
+
+    const confidence = clamp(Number(examConfidence), 0, 100);
+    const targetMastery = clamp(Number(examTargetMastery), 1, 100);
+
+    if (confidence >= targetMastery) {
+      alert("Target mastery should be higher than current confidence");
+      return;
+    }
+
+    setExams((previous) => [
+      ...previous,
+      {
+        id: crypto.randomUUID(),
+        name: examName.trim(),
+        subject: examSubject.trim(),
+        date: examDate,
+        confidence,
+        targetMastery,
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+    resetExamForm();
+  };
+
+  const handleDeleteExam = (examId) => {
+    if (!confirm("Delete this exam plan?")) return;
+    setExams((previous) => previous.filter((exam) => exam.id !== examId));
+  };
+
   const markReviewed = (topic, rating) => {
     updateReviewSchedule(topic, rating);
   };
@@ -448,6 +580,8 @@ function App() {
   });
   const timelineData = buildTimeline(reviewTopics);
   const weeklyDebrief = useMemo(() => buildDebrief(sessions, reviewTopics), [sessions, reviewTopics]);
+  const examPlans = useMemo(() => buildExamPlans(exams, sessions, today), [exams, sessions, today]);
+  const countdownData = useMemo(() => buildCountdownData(examPlans), [examPlans]);
   const score = Math.min((totalHours / 6) * 100, 100).toFixed(0);
 
   const exportDebrief = async () => {
@@ -584,6 +718,80 @@ function App() {
               </button>
             )}
           </div>
+
+          <div className="mt-5 rounded-lg border border-zinc-200 bg-white p-4">
+            <div className="mb-3">
+              <h2 className="text-lg font-bold">Exam Countdown</h2>
+              <p className="text-sm text-zinc-500">Reverse-plan weekly targets from exam dates.</p>
+            </div>
+
+            <div className="grid gap-3">
+              <label className="text-left text-sm font-semibold">
+                Exam
+                <input
+                  type="text"
+                  placeholder="JEE Main 2026"
+                  value={examName}
+                  onChange={(e) => setExamName(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-zinc-300 p-2 font-normal outline-none focus:border-blue-500"
+                />
+              </label>
+
+              <label className="text-left text-sm font-semibold">
+                Subject or topic scope
+                <input
+                  type="text"
+                  placeholder="Physics"
+                  value={examSubject}
+                  onChange={(e) => setExamSubject(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-zinc-300 p-2 font-normal outline-none focus:border-blue-500"
+                />
+              </label>
+
+              <label className="text-left text-sm font-semibold">
+                Exam date
+                <input
+                  type="date"
+                  value={examDate}
+                  onChange={(e) => setExamDate(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-zinc-300 p-2 font-normal outline-none focus:border-blue-500"
+                />
+              </label>
+
+              <label className="text-left text-sm font-semibold">
+                Current confidence: {examConfidence}%
+                <input
+                  type="range"
+                  value={examConfidence}
+                  onChange={(e) => setExamConfidence(e.target.value)}
+                  className="mt-2 w-full accent-amber-600"
+                  min="0"
+                  max="100"
+                  step="5"
+                />
+              </label>
+
+              <label className="text-left text-sm font-semibold">
+                Target mastery: {examTargetMastery}%
+                <input
+                  type="range"
+                  value={examTargetMastery}
+                  onChange={(e) => setExamTargetMastery(e.target.value)}
+                  className="mt-2 w-full accent-emerald-600"
+                  min="50"
+                  max="100"
+                  step="5"
+                />
+              </label>
+
+              <button
+                onClick={handleAddExam}
+                className="rounded-md bg-zinc-950 py-2 font-semibold text-white hover:bg-zinc-800"
+              >
+                Add Exam Plan
+              </button>
+            </div>
+          </div>
         </section>
 
         <section className="grid gap-5">
@@ -600,6 +808,92 @@ function App() {
               <p className="text-sm text-zinc-500">Due today</p>
               <p className="mt-1 text-3xl font-bold text-red-700">{dueTopics.length}</p>
             </div>
+          </div>
+
+          <div className="rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
+            <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-bold">Countdown Intelligence</h2>
+                <p className="text-sm text-zinc-500">
+                  Weekly and daily targets rebalance from logged sessions and remaining mastery gap.
+                </p>
+              </div>
+              <span className="rounded-md bg-zinc-100 px-2 py-1 text-xs font-semibold text-zinc-600">
+                {examPlans.length} exams
+              </span>
+            </div>
+
+            {examPlans.length === 0 ? (
+              <p className="rounded-md bg-zinc-50 p-3 text-sm text-zinc-500">
+                Add an exam plan to see urgency, target hours, and countdown pacing.
+              </p>
+            ) : (
+              <div className="grid gap-4 xl:grid-cols-[1fr_380px]">
+                <div className="h-72">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={countdownData} margin={{ top: 8, right: 20, left: -12, bottom: 8 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#E4E4E7" />
+                      <XAxis dataKey="name" tick={{ fontSize: 12 }} interval={0} />
+                      <YAxis allowDecimals={false} tick={{ fontSize: 12 }} />
+                      <Tooltip
+                        formatter={(value, name, item) => [
+                          `${value} day${value === 1 ? "" : "s"}`,
+                          item.payload.subject,
+                        ]}
+                      />
+                      <Bar dataKey="daysLeft" radius={[6, 6, 0, 0]}>
+                        {countdownData.map((entry) => (
+                          <Cell key={entry.name} fill={entry.fill} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+
+                <div className="grid max-h-72 gap-2 overflow-y-auto">
+                  {examPlans.map((plan) => (
+                    <div key={plan.id} className={`rounded-md border border-zinc-200 p-3 ${plan.urgency.bg}`}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="font-semibold">{plan.name}</p>
+                          <p className="text-xs text-zinc-600">
+                            {plan.subject || "All topics"} | {formatShortDate(plan.date)} |{" "}
+                            <span className={`font-bold ${plan.urgency.text}`}>{plan.urgency.label}</span>
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => handleDeleteExam(plan.id)}
+                          className="rounded-md bg-white px-2 py-1 text-xs font-semibold text-zinc-700 hover:bg-zinc-100"
+                        >
+                          Delete
+                        </button>
+                      </div>
+
+                      <div className="mt-3 grid grid-cols-3 gap-2 text-sm">
+                        <div>
+                          <p className="text-xs text-zinc-500">Days left</p>
+                          <p className="text-xl font-bold">{plan.daysLeft}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-zinc-500">Need/week</p>
+                          <p className="text-xl font-bold">{plan.hoursPerWeek.toFixed(1)}h</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-zinc-500">Need/day</p>
+                          <p className="text-xl font-bold">{plan.hoursPerDay.toFixed(1)}h</p>
+                        </div>
+                      </div>
+
+                      <div className="mt-3 rounded-md bg-white/80 p-2 text-xs text-zinc-600">
+                        Mastery {Math.round(plan.projectedMastery)}% / {plan.targetMastery}% after{" "}
+                        {plan.relevantHours.toFixed(1)}h logged. This week still needs{" "}
+                        <span className="font-bold text-zinc-950">{plan.thisWeekTarget.toFixed(1)}h</span>.
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
