@@ -15,7 +15,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import CoachPage from "./components/CoachPage";
+import SmartCoach from "./components/SmartCoach";
 
 const SESSION_STORAGE_KEY = "studyTracker_sessions";
 const REVIEW_STORAGE_KEY = "studyTracker_reviews";
@@ -598,18 +598,24 @@ function App() {
   };
 
   if (page === "coach") {
-    return (
-      <div className="min-h-screen bg-slate-950">
+  return (
+    <div className="min-h-screen bg-slate-100 px-4 py-8">
+      <div className="mx-auto max-w-2xl">
         <button
           onClick={() => setPage("tracker")}
-          className="fixed left-4 top-4 z-10 rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700"
+          className="mb-6 rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700"
         >
-          Back to Tracker
+          ← Back to Tracker
         </button>
-        <CoachPage sessions={sessions} />
+        <SmartCoach
+          sessions={sessions}
+          exams={exams}
+          reviewTopics={reviewTopics}
+        />
       </div>
-    );
-  }
+    </div>
+  );
+}
 
   return (
     <div className="min-h-screen bg-zinc-100 px-4 py-6 text-zinc-950">
