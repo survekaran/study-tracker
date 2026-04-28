@@ -16,6 +16,7 @@ import {
   YAxis,
 } from "recharts";
 import SmartCoach from "./components/SmartCoach";
+import MiniTimer from "./components/MiniTimer";
 
 const SESSION_STORAGE_KEY = "studyTracker_sessions";
 const REVIEW_STORAGE_KEY = "studyTracker_reviews";
@@ -402,6 +403,33 @@ function App() {
     return () => clearInterval(interval);
   }, [isRunning]);
 
+  useEffect(() => {
+    const handleStop = () => {
+      if (isRunning) stopTimer();
+    };
+    window.addEventListener('stopStudyTimer', handleStop);
+
+    const handleStorage = (e) => {
+      if (e.key === "studyTimer") {
+        const data = JSON.parse(e.newValue || "{}");
+        if (data.isRunning && !isRunning) {
+          setIsRunning(true);
+          setTimerStartedAt(data.startedAtIso || new Date().toISOString());
+          setSubject(data.subject || "");
+          setSeconds(Math.floor((Date.now() - data.startTime) / 1000));
+        } else if (!data.isRunning && isRunning) {
+          stopTimer();
+        }
+      }
+    };
+    window.addEventListener("storage", handleStorage);
+
+    return () => {
+      window.removeEventListener('stopStudyTimer', handleStop);
+      window.removeEventListener("storage", handleStorage);
+    };
+  });
+
   const updateReviewSchedule = (topic, rating, studiedOn = toDateKey()) => {
     const cleanTopic = topic.trim();
     if (!cleanTopic) return;
@@ -480,11 +508,28 @@ function App() {
       alert("Enter topic before starting timer");
       return;
     }
-    setTimerStartedAt(new Date().toISOString());
+    
+    const startTime = Date.now();
+    const startedAtIso = new Date().toISOString();
+    
+    localStorage.setItem(
+      "studyTimer",
+      JSON.stringify({
+        startTime,
+        startedAtIso,
+        isRunning: true,
+        subject: subject.trim(),
+      })
+    );
+    window.dispatchEvent(new Event("studyTimerLocalUpdate"));
+
+    setTimerStartedAt(startedAtIso);
     setIsRunning(true);
   };
 
   const stopTimer = () => {
+    localStorage.setItem("studyTimer", JSON.stringify({ isRunning: false }));
+    window.dispatchEvent(new Event("studyTimerLocalUpdate"));
     setIsRunning(false);
 
     const durationMinutes = Math.round(seconds / 60);
@@ -598,27 +643,32 @@ function App() {
   };
 
   if (page === "coach") {
-  return (
-    <div className="min-h-screen bg-slate-100 px-4 py-8">
-      <div className="mx-auto max-w-2xl">
-        <button
-          onClick={() => setPage("tracker")}
-          className="mb-6 rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700"
-        >
-          ← Back to Tracker
-        </button>
-        <SmartCoach
-          sessions={sessions}
-          exams={exams}
-          reviewTopics={reviewTopics}
-        />
-      </div>
-    </div>
-  );
-}
+    return (
+      <>
+        <MiniTimer />
+        <div className="min-h-screen bg-slate-100 px-4 py-8">
+          <div className="mx-auto max-w-2xl">
+            <button
+              onClick={() => setPage("tracker")}
+              className="mb-6 rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700"
+            >
+              ← Back to Tracker
+            </button>
+            <SmartCoach
+              sessions={sessions}
+              exams={exams}
+              reviewTopics={reviewTopics}
+            />
+          </div>
+        </div>
+      </>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-zinc-100 px-4 py-6 text-zinc-950">
+    <>
+      <MiniTimer />
+      <div className="min-h-screen bg-zinc-100 px-4 py-6 text-zinc-950">
       <main className="mx-auto grid max-w-7xl gap-5 lg:grid-cols-[380px_1fr]">
         <section className="rounded-lg border border-zinc-200 bg-white p-5 shadow-sm">
           <div className="mb-5 flex items-center justify-between gap-3">
@@ -1144,6 +1194,7 @@ function App() {
         </section>
       </main>
     </div>
+    </>
   );
 }
 
